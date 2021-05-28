@@ -22,8 +22,22 @@ import shutil
 import mimetypes
 import re
 import base64
+import signal
 from functools import partial
 from io import BytesIO
+
+import time
+from timeloop import Timeloop
+from datetime import timedelta
+
+tl = Timeloop()
+
+class ProgramKilled(Exception):
+    pass
+
+
+def signal_handler(signum, frame):
+    raise ProgramKilled
 
 
 def fbytes(B):
@@ -370,6 +384,11 @@ class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     import argparse
+    from os import path, listdir, remove
+    from datetime import datetime as dt
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -391,9 +410,33 @@ if __name__ == "__main__":
     parser.add_argument(
         '--directory',
         '-d',
-        default=os.getcwd(),
+        default='/data',
+        type=str,
         help='Specify alternative directory '
              '[default:current directory]'
+    )
+    parser.add_argument(
+        '--extensions',
+        '-e',
+        default='.iso',
+        help='Specify the extensions that should be included in the clean function'
+             '[default:.iso]'
+    )
+    parser.add_argument(
+        '--lapsetime',
+        '-l',
+        default=1,
+        type=int,
+        help='Specify the age of the files to delete (in seconds)'
+             '[default:1]'
+    )
+    parser.add_argument(
+        '--cleantime',
+        '-c',
+        default=30,
+        type=int,
+        help='Specify the clean interval (in seconds)'
+             '[default:1]'
     )
     parser.add_argument(
         '--username',
@@ -420,7 +463,32 @@ if __name__ == "__main__":
         password=args.password,
     )
 
+    #web_dir = os.path.join(os.path.dirname(__file__), args.directory)
+
+    @tl.job(interval=timedelta(seconds=args.cleantime))
+    def cleanupfiles():
+        print("Executing Cleanup : {}".format(time.ctime()))
+        now = dt.now()
+        files_to_by_extension = [path.join(args.directory, f) for f in listdir(args.directory)]
+        removed_files_counter = 0
+        for f in files_to_by_extension:
+            print("Found File {} : {}".format(f, time.ctime()))
+            delta = now - dt.fromtimestamp(path.getmtime(f))
+            if delta.seconds > args.lapsetime:
+                try:
+                    print("Removing {}: {}".format(f, time.ctime()))
+                    remove(f)
+                    #removed_files_counter += 1
+                except OSError:
+                    pass
+
+    os.chdir(args.directory)
+    tl.start(block=False)
     with socketserver.TCPServer((BIND, PORT), Handler) as httpd:
         serve_message = "Serving HTTP on {host} port {port} (http://{host}:{port}/) ..."
         print(serve_message.format(host=HOST, port=PORT))
-        httpd.serve_forever()
+        try:
+            httpd.serve_forever()
+        except ProgramKilled:
+            print("Program Killed")
+            httpd.server_close()
